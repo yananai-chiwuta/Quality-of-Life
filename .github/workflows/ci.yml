@@ -19,6 +19,9 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ['3.11', '3.13']
 
+    defaults:
+      run:
+        working-directory: projects/LiteNetMonitor
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

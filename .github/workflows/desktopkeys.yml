@@ -1,0 +1,41 @@
+name: DesktopKeys
+on:
+  push:
+    branches: ['**']
+    tags: ['desktopkeys-v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: projects/DesktopKeys
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: ./Build.ps1
+      - name: Verify hotkeys
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'desktopkeys-check.txt'
+          $check = Start-Process ./DesktopKeys.exe -ArgumentList @('--verify', ('"' + $report + '"')) -Wait -PassThru
+          Get-Content -LiteralPath $report
+          if ($check.ExitCode -ne 0) { throw 'Verification failed' }
+      - name: Package
+        run: Compress-Archive -LiteralPath DesktopKeys.exe,README.md,LICENSE -DestinationPath DesktopKeys-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DesktopKeys-windows
+          path: projects/DesktopKeys/DesktopKeys-windows.zip
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/desktopkeys-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$env:RELEASE_TAG" --verify-tag --title "DesktopKeys $env:RELEASE_TAG" --notes "PgUp/PgDn desktop switching, startup at sign-in, no tray icon. MIT licensed." --latest=false DesktopKeys-windows.zip
+    permissions:
+      contents: write

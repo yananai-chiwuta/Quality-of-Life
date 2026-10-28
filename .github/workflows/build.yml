@@ -27,6 +27,9 @@ jobs:
             target: macos-x64
     env:
       RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+    defaults:
+      run:
+        working-directory: projects/LiteNetMonitor
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -52,7 +55,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LiteNetMonitor-${{ matrix.target }}
-          path: dist/releases/*
+          path: projects/LiteNetMonitor/dist/releases/*
           if-no-files-found: error
 
   release:

@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Test and editor cache
+.pytest_cache/
+.idea/
+.vscode/
+
+# PyInstaller build folders and files
+build/
+dist/
+*.spec
