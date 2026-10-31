@@ -1,4 +1,4 @@
-// DesktopKeys: two fixed global hotkeys, using Windows and .NET Framework only.
+// DesktopKeys: desktop switching and Menu-key Alt+Tab, using Windows and .NET Framework only.
 // Build: see Build.ps1. No tray icon; startup is enabled on first launch. No keyboard logging, network access or administrator rights.
 using System;
 using System.Collections.Generic;
@@ -71,16 +71,14 @@ internal static class DesktopKeys
         internal void Enable()
         {
             if (Enabled) return;
-            bool up = RegisterHotKey(Handle, 1, 0x4000, 0x21);
-            int upError = Marshal.GetLastWin32Error();
-            bool down = RegisterHotKey(Handle, 2, 0x4000, 0x22);
-            int downError = Marshal.GetLastWin32Error();
-            if (!up || !down)
+            uint[] keys = { 0x21, 0x22, (uint)Keys.Apps };
+            for (int index = 0; index < keys.Length; index++)
             {
-                if (up) UnregisterHotKey(Handle, 1);
-                if (down) UnregisterHotKey(Handle, 2);
-                throw new Win32Exception(!up ? upError : downError,
-                    "Could not reserve PgUp and PgDn. Exit another key mapper and try again.");
+                if (RegisterHotKey(Handle, index + 1, 0x4000, keys[index])) continue;
+                int error = Marshal.GetLastWin32Error();
+                for (int registered = 1; registered <= index; registered++) UnregisterHotKey(Handle, registered);
+                throw new Win32Exception(error,
+                    "Could not reserve PgUp, PgDn and the Menu key. Exit another key mapper and try again.");
             }
             Enabled = true;
         }
@@ -89,7 +87,7 @@ internal static class DesktopKeys
         {
             if (!Enabled) return;
             Enabled = false;
-            UnregisterHotKey(Handle, 1); UnregisterHotKey(Handle, 2);
+            UnregisterHotKey(Handle, 1); UnregisterHotKey(Handle, 2); UnregisterHotKey(Handle, 3);
         }
 
         protected override void WndProc(ref Message message)
@@ -98,6 +96,7 @@ internal static class DesktopKeys
             {
                 if (message.WParam.ToInt32() == 1) onHotkey(0x25);
                 if (message.WParam.ToInt32() == 2) onHotkey(0x27);
+                if (message.WParam.ToInt32() == 3) onHotkey(0x09);
                 return;
             }
             if (message.Msg == StopMessage) { onStop(); return; }
@@ -162,12 +161,21 @@ internal static class DesktopKeys
     }
     internal static Input Key(ushort key, bool up)
     {
-        bool extended = key == 0x25 || key == 0x27 || key == 0x5B || key == 0x21 || key == 0x22;
+        bool extended = key == 0x25 || key == 0x27 || key == 0x5B || key == 0x21 || key == 0x22 || key == (ushort)Keys.Apps;
         return new Input { Type = 1, Data = new InputUnion { Keyboard = new KeyboardInput {
             Key = key, Flags = (up ? 2u : 0u) | (extended ? 1u : 0u), Extra = InputMarker } } };
     }
     internal static Input[] BuildShortcut(ushort arrow)
     {
+        if (arrow == 0x09)
+        {
+            bool altHeld = Held(0xA4) || Held(0xA5);
+            var switchEvents = new List<Input>();
+            if (!altHeld) switchEvents.Add(Key(0xA4, false));
+            switchEvents.Add(Key(0x09, false)); switchEvents.Add(Key(0x09, true));
+            if (!altHeld) switchEvents.Add(Key(0xA4, true));
+            return switchEvents.ToArray();
+        }
         // Preserve modifiers physically held after the original hotkey was queued.
         var events = new List<Input>();
         bool winHeld = Held(0x5B) || Held(0x5C);
@@ -210,22 +218,23 @@ internal static class DesktopKeys
             window.Enable();
             InjectPage(0x21); PumpUntil(received, 1);
             InjectPage(0x22); PumpUntil(received, 2);
-            if (received[0] != 0x25 || received[1] != 0x27) throw new Exception("Incorrect hotkey dispatch.");
+            InjectPage((ushort)Keys.Apps); PumpUntil(received, 3);
+            if (received[0] != 0x25 || received[1] != 0x27 || received[2] != 0x09) throw new Exception("Incorrect hotkey dispatch.");
             foreach (ushort arrow in received)
             {
                 Input[] events = BuildShortcut(arrow);
-                ushort[] expectedKeys = { 0x5B, 0xA2, arrow, arrow, 0xA2, 0x5B };
-                if (events.Length != 6) throw new Exception("Incorrect shortcut length.");
+                ushort[] expectedKeys = arrow == 0x09 ? new ushort[] { 0xA4, 0x09, 0x09, 0xA4 } : new ushort[] { 0x5B, 0xA2, arrow, arrow, 0xA2, 0x5B };
+                if (events.Length != expectedKeys.Length) throw new Exception("Incorrect shortcut length.");
                 for (int index = 0; index < events.Length; index++)
                     if (events[index].Type != 1 || events[index].Data.Keyboard.Key != expectedKeys[index] ||
-                        ((events[index].Data.Keyboard.Flags & 2) != 0) != (index >= 3))
+                        ((events[index].Data.Keyboard.Flags & 2) != 0) != (index >= events.Length / 2))
                         throw new Exception("Incorrect key sequence.");
             }
             window.Disable(); window.Enable(); window.Disable();
         }
-        // Confirm exit/pause released both hotkeys by reserving them again.
+        // Confirm exit/pause released all hotkeys by reserving them again.
         using (var window = new HotkeyWindow(delegate(ushort arrow) { }, delegate { })) window.Enable();
-        File.WriteAllText(report, "PASS: native INPUT layout; real PgUp/PgDn injection and WM_HOTKEY routing; Win+Ctrl+Left/Right key-down/key-up sequences; pause/resume; registration cleanup. No desktop-switch shortcut was emitted.");
+        File.WriteAllText(report, "PASS: native INPUT layout; real PgUp/PgDn/Menu injection and WM_HOTKEY routing; Win+Ctrl+Left/Right and Alt+Tab key-down/key-up sequences; pause/resume; registration cleanup. No desktop-switch or app-switch shortcut was emitted.");
     }
     private static void InjectPage(ushort key)
     {
