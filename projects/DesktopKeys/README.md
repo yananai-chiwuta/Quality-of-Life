@@ -2,7 +2,7 @@
 
 Map **PgUp → Win+Ctrl+Left** and **PgDn → Win+Ctrl+Right** to switch Windows virtual desktops. One switch per press; modified PgUp/PgDn shortcuts remain available. No tray icon or settings window.
 
-**Menu/Application key → Alt+Tab** switches to the previous app window. This is the key near the right Ctrl/Windows keys, often marked with a menu or mouse symbol. Each press completes Alt+Tab, so repeated presses toggle between your two most recent windows. It switches windows rather than browser tabs. Its usual right-click menu is replaced while DesktopKeys runs; Shift+F10 remains available for a keyboard context menu.
+**Menu/Application key → Alt+Tab** switches to the previous app window when you release the key. This is the key near the right Ctrl/Windows keys, often marked with a menu or mouse symbol. Each press completes Alt+Tab, so repeated presses toggle between your two most recent windows. Holding the key does not repeat. It switches windows rather than browser tabs. Both original key events are suppressed, so its usual right-click menu does not open while DesktopKeys runs; Shift+F10 remains available for a keyboard context menu.
 
 ## Use
 
@@ -31,12 +31,12 @@ Windows 10/11 and .NET Framework 4.x are required. No NuGet packages or download
 ./DesktopKeys.exe --verify "$PWD\verification.txt"
 ```
 
-Stop the regular instance first. Verification checks real source-key injection, hotkey routing, native structure sizes, target key sequences and registration cleanup without switching desktops, switching apps or changing startup. Try the actual desktop switch in your session too.
+Stop the regular instance first. Verification briefly opens a test window and checks that Menu-key presses, repeats and releases never reach it or open a context menu. It also checks real source-key injection, hotkey routing, native structure sizes, target key sequences and registration cleanup without switching desktops, emitting Alt+Tab or changing startup. Try the actual desktop switch in your session too.
 
 The executable includes the original desktop-and-arrows icon in `DesktopKeys.ico`; its editable vector source is `DesktopKeys.svg`. It runs as a single background process and waits on Windows messages. Memory use varies by PC. Protected desktops and some elevated windows may block SendInput. Builds are unsigned.
 
 ## Implementation and license
 
-`DesktopKeys.cs` contains all behavior. `Build.ps1` invokes the Windows .NET Framework C# compiler. No telemetry, network access, key logging or polling loop. [MIT license](LICENSE).
+`DesktopKeys.cs` contains all behavior. PgUp/PgDn use registered hotkeys; a low-level keyboard hook consumes the Menu key's press and release. The hook posts the switch to the message loop rather than doing input injection inside the callback. `Build.ps1` invokes the Windows .NET Framework C# compiler. No telemetry, network access, key logging or polling loop. [MIT license](LICENSE).
 
 Windows API references: [RegisterHotKey](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerhotkey), [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput).

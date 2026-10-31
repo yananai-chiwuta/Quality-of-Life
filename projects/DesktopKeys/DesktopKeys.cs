@@ -60,25 +60,37 @@ internal static class DesktopKeys
     {
         private readonly Action<ushort> onHotkey;
         private readonly Action onStop;
+        private readonly KeyboardHook menuCallback;
+        private IntPtr menuHook;
+        private bool menuDown;
+        private const int MenuSwitchMessage = 0x8002;
         internal bool Enabled { get; private set; }
 
         internal HotkeyWindow(Action<ushort> callback, Action stop)
         {
             onHotkey = callback; onStop = stop;
+            menuCallback = FilterMenuKey;
             CreateHandle(new CreateParams { Caption = WindowTitle, Parent = new IntPtr(-3) });
         }
 
         internal void Enable()
         {
             if (Enabled) return;
-            uint[] keys = { 0x21, 0x22, (uint)Keys.Apps };
+            uint[] keys = { 0x21, 0x22 };
             for (int index = 0; index < keys.Length; index++)
             {
                 if (RegisterHotKey(Handle, index + 1, 0x4000, keys[index])) continue;
                 int error = Marshal.GetLastWin32Error();
                 for (int registered = 1; registered <= index; registered++) UnregisterHotKey(Handle, registered);
                 throw new Win32Exception(error,
-                    "Could not reserve PgUp, PgDn and the Menu key. Exit another key mapper and try again.");
+                    "Could not reserve PgUp and PgDn. Exit another key mapper and try again.");
+            }
+            menuHook = SetWindowsHookEx(13, menuCallback, GetModuleHandle(null), 0);
+            if (menuHook == IntPtr.Zero)
+            {
+                int error = Marshal.GetLastWin32Error();
+                UnregisterHotKey(Handle, 1); UnregisterHotKey(Handle, 2);
+                throw new Win32Exception(error, "Could not intercept the Menu key.");
             }
             Enabled = true;
         }
@@ -87,7 +99,26 @@ internal static class DesktopKeys
         {
             if (!Enabled) return;
             Enabled = false;
-            UnregisterHotKey(Handle, 1); UnregisterHotKey(Handle, 2); UnregisterHotKey(Handle, 3);
+            UnregisterHotKey(Handle, 1); UnregisterHotKey(Handle, 2);
+            UnhookWindowsHookEx(menuHook); menuHook = IntPtr.Zero; menuDown = false;
+        }
+
+        private IntPtr FilterMenuKey(int code, IntPtr message, IntPtr data)
+        {
+            // Consume BOTH edges: letting the original key-up through can open a
+            // context menu in the window we just switched to. Ignore auto-repeat.
+            if (code >= 0 && Enabled && Marshal.ReadInt32(data) == (int)Keys.Apps)
+            {
+                int kind = message.ToInt32();
+                if (kind == 0x0100 || kind == 0x0104) menuDown = true;
+                if (kind == 0x0101 || kind == 0x0105)
+                {
+                    if (menuDown) PostMessage(Handle, MenuSwitchMessage, IntPtr.Zero, IntPtr.Zero);
+                    menuDown = false;
+                }
+                return new IntPtr(1);
+            }
+            return CallNextHookEx(menuHook, code, message, data);
         }
 
         protected override void WndProc(ref Message message)
@@ -96,7 +127,11 @@ internal static class DesktopKeys
             {
                 if (message.WParam.ToInt32() == 1) onHotkey(0x25);
                 if (message.WParam.ToInt32() == 2) onHotkey(0x27);
-                if (message.WParam.ToInt32() == 3) onHotkey(0x09);
+                return;
+            }
+            if (message.Msg == MenuSwitchMessage)
+            {
+                if (Enabled) onHotkey(0x09);
                 return;
             }
             if (message.Msg == StopMessage) { onStop(); return; }
@@ -218,7 +253,7 @@ internal static class DesktopKeys
             window.Enable();
             InjectPage(0x21); PumpUntil(received, 1);
             InjectPage(0x22); PumpUntil(received, 2);
-            InjectPage((ushort)Keys.Apps); PumpUntil(received, 3);
+            VerifyMenuSuppression(received);
             if (received[0] != 0x25 || received[1] != 0x27 || received[2] != 0x09) throw new Exception("Incorrect hotkey dispatch.");
             foreach (ushort arrow in received)
             {
@@ -234,7 +269,44 @@ internal static class DesktopKeys
         }
         // Confirm exit/pause released all hotkeys by reserving them again.
         using (var window = new HotkeyWindow(delegate(ushort arrow) { }, delegate { })) window.Enable();
-        File.WriteAllText(report, "PASS: native INPUT layout; real PgUp/PgDn/Menu injection and WM_HOTKEY routing; Win+Ctrl+Left/Right and Alt+Tab key-down/key-up sequences; pause/resume; registration cleanup. No desktop-switch or app-switch shortcut was emitted.");
+        File.WriteAllText(report, "PASS: native INPUT layout; real PgUp/PgDn/Menu routing; Menu down/up and repeats suppressed before reaching a focused window; no context menu; one switch per press; Win+Ctrl+Left/Right and Alt+Tab sequences; pause/resume; cleanup. No desktop-switch or app-switch shortcut was emitted.");
+    }
+
+    private sealed class MenuProbe : Form
+    {
+        internal int MenuMessages, ContextMenus;
+        protected override void WndProc(ref Message message)
+        {
+            if ((message.Msg == 0x0100 || message.Msg == 0x0101 || message.Msg == 0x0104 || message.Msg == 0x0105)
+                && message.WParam.ToInt32() == (int)Keys.Apps) MenuMessages++;
+            if (message.Msg == 0x007B) ContextMenus++;
+            base.WndProc(ref message);
+        }
+    }
+    private static void VerifyMenuSuppression(List<ushort> received)
+    {
+        using (var probe = new MenuProbe { Text = "DesktopKeys Menu-key verification", Width = 340, Height = 100 })
+        {
+            probe.Show(); probe.Activate();
+            var timeout = Stopwatch.StartNew();
+            while (GetForegroundWindow() != probe.Handle && timeout.ElapsedMilliseconds < 2000)
+            { Application.DoEvents(); Thread.Sleep(10); }
+            if (GetForegroundWindow() != probe.Handle) throw new Exception("Could not focus the Menu-key test window.");
+            Input[] held = { Key((ushort)Keys.Apps, false), Key((ushort)Keys.Apps, false) };
+            if (SendInput(2, held, Marshal.SizeOf(typeof(Input))) != 2) throw new Exception("Menu press injection failed.");
+            PumpFor(100);
+            if (received.Count != 2) throw new Exception("Menu switched before release, or repeated while held.");
+            Input[] release = { Key((ushort)Keys.Apps, true) };
+            if (SendInput(1, release, Marshal.SizeOf(typeof(Input))) != 1) throw new Exception("Menu release injection failed.");
+            PumpUntil(received, 3); PumpFor(100);
+            if (received.Count != 3 || probe.MenuMessages != 0 || probe.ContextMenus != 0)
+                throw new Exception("Menu key leaked to the foreground window or produced multiple switches.");
+        }
+    }
+    private static void PumpFor(int milliseconds)
+    {
+        var timeout = Stopwatch.StartNew();
+        while (timeout.ElapsedMilliseconds < milliseconds) { Application.DoEvents(); Thread.Sleep(10); }
     }
     private static void InjectPage(ushort key)
     {
@@ -253,4 +325,10 @@ internal static class DesktopKeys
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string className, string windowName);
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
+    private delegate IntPtr KeyboardHook(int code, IntPtr message, IntPtr data);
+    [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr SetWindowsHookEx(int kind, KeyboardHook callback, IntPtr module, uint thread);
+    [DllImport("user32.dll")] private static extern bool UnhookWindowsHookEx(IntPtr hook);
+    [DllImport("user32.dll")] private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr message, IntPtr data);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
 }
